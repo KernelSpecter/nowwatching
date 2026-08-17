@@ -40,7 +40,9 @@ Design notes worth knowing before editing:
 import json
 import os
 import queue
+import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -954,6 +956,148 @@ def run_test(cfg, seconds=90):
     return 0
 
 
+# --------------------------------------------------------------------------
+# autostart
+#
+# One HKCU Run entry, which is the same mechanism Discord and Spotify use for
+# themselves. No admin rights, no scheduled task, no service to register, and it
+# is a single value to delete if you change your mind.
+# --------------------------------------------------------------------------
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "nowwatching"
+
+
+def autostart_argv():
+    r"""The exact command Windows should run at login.
+
+    pythonw.exe rather than python.exe: the console host would otherwise leave a
+    black window sitting open for as long as the daemon runs, which is all day.
+
+    Absolute paths throughout. PATH at login is not the PATH a terminal gives
+    you, and on this kind of setup `python` is a shim that resolves elsewhere, so
+    the bare name is not safe to rely on.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    exe = Path(sys.executable)
+    pyw = exe.with_name("pythonw.exe")
+    if pyw.is_file():
+        exe = pyw
+    return [str(exe), str(HERE / "nowwatching.py")]
+
+
+def autostart_command():
+    return " ".join(f'"{a}"' for a in autostart_argv())
+
+
+def autostart_read():
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            return winreg.QueryValueEx(key, RUN_NAME)[0]
+    except OSError:
+        return None
+
+
+def autostart_write(value):
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                        winreg.KEY_SET_VALUE) as key:
+        if value is None:
+            try:
+                winreg.DeleteValue(key, RUN_NAME)
+            except FileNotFoundError:
+                pass
+        else:
+            winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, value)
+
+
+def daemon_running(port):
+    """Is something already listening? The port is this project's only lock."""
+    with socket.socket() as s:
+        s.settimeout(0.4)
+        return s.connect_ex(("127.0.0.1", int(port))) == 0
+
+
+def spawn_detached():
+    """Start the daemon so it outlives this process and shows no window."""
+    flags = 0
+    if os.name == "nt":
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                 | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    subprocess.Popen(autostart_argv(), cwd=str(HERE), creationflags=flags,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True)
+
+
+def do_install(cfg):
+    if os.name != "nt":
+        print("--install is Windows only. Elsewhere, add this to your desktop")
+        print("environment's autostart or a systemd user unit:")
+        print(f"  {autostart_command()}")
+        return 1
+    if not cfg.get("client_id"):
+        print("config.json has no client_id yet.")
+        print("Fill that in first, or the daemon exits immediately every login.")
+        print("See the README's Quick start.")
+        return 2
+
+    cmd = autostart_command()
+    try:
+        autostart_write(cmd)
+    except OSError as e:
+        print(f"ERROR: could not write the autostart entry ({e})")
+        return 1
+
+    print("Installed. nowwatching now starts at every login.")
+    print(f"  {cmd}")
+
+    port = cfg.get("port", 6788)
+    if daemon_running(port):
+        print(f"\nAlready running on port {port}, so nothing to start.")
+    else:
+        try:
+            spawn_detached()
+            print("\nStarted it now too, in the background.")
+        except OSError as e:
+            print(f"\nCould not start it now ({e}); it will start at next login.")
+
+    print("\nThat is everything. Play something and presence appears.")
+    print("Undo with:  python nowwatching.py --uninstall")
+    return 0
+
+
+def do_uninstall(cfg):
+    if os.name != "nt":
+        print("--uninstall is Windows only.")
+        return 1
+    try:
+        autostart_write(None)
+    except OSError as e:
+        print(f"ERROR: could not remove the autostart entry ({e})")
+        return 1
+    print("Removed the autostart entry. nowwatching will not start at login.")
+    if daemon_running(cfg.get("port", 6788)):
+        print("The copy already running is untouched. Close it from Task")
+        print("Manager, or just log out.")
+    return 0
+
+
+def do_status(cfg):
+    entry = autostart_read() if os.name == "nt" else None
+    port = cfg.get("port", 6788)
+    print(f"nowwatching {VERSION}")
+    print(f"  client_id   {'set' if cfg.get('client_id') else 'MISSING'}")
+    print(f"  autostart   {entry or 'not installed'}")
+    print(f"  running     {'yes' if daemon_running(port) else 'no'} "
+          f"(port {port})")
+    if entry and entry != autostart_command():
+        print("\nNote: the autostart entry points somewhere else. If you moved")
+        print("this folder, re-run --install to repoint it.")
+    return 0
+
+
 def main(argv):
     cfg = CONFIG
     dry_run = "--dry-run" in argv
@@ -1143,7 +1287,11 @@ def main(argv):
 
 USAGE = f"""nowwatching {VERSION} - Discord Rich Presence for what you are watching
 
-  python nowwatching.py              run the bridge (this is the normal case)
+  python nowwatching.py              run it in the foreground
+  python nowwatching.py --install    start at login, and start now (do this once)
+  python nowwatching.py --uninstall  undo that
+  python nowwatching.py --status     is it installed, is it running
+
   python nowwatching.py --test       publish one sample card, no browser needed
   python nowwatching.py --dry-run    print payloads, never contacting Discord
   python nowwatching.py --port 6789  listen somewhere else
@@ -1163,11 +1311,46 @@ pip install.
 """
 
 
+def owns_console():
+    """True when we are the only process on this console: a double-click.
+
+    Distinguishes that from being run inside an existing terminal, where pausing
+    at the end would just be an annoyance.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        arr = (ctypes.c_uint * 4)()
+        return ctypes.windll.kernel32.GetConsoleProcessList(arr, 4) == 1
+    except Exception:                            # noqa: BLE001 - last resort
+        return False
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--help" in args or "-h" in args:
         print(USAGE)
         sys.exit(0)
+
+    if "--install" in args or "--uninstall" in args or "--status" in args:
+        use_utf8_stdout()
+        if "--status" in args:
+            code = do_status(CONFIG)
+        elif "--uninstall" in args:
+            code = do_uninstall(CONFIG)
+        else:
+            code = do_install(CONFIG)
+        # Double-clicked, so the window is about to close and take the message
+        # with it. Hold it open long enough to be read.
+        if owns_console():
+            print()
+            try:
+                input("Press Enter to close...")
+            except EOFError:
+                pass
+        sys.exit(code)
+
     if "--test" in args:
         sys.exit(run_test(CONFIG))
     sys.exit(main(args))

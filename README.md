@@ -42,21 +42,47 @@ Application**. Name it anything at all, copy the **Application ID** from
 No bot, no OAuth, no token. An Application ID is a public identifier, not a
 secret.
 
-**2. Run it.**
+**2. Double-click `install.cmd`.**
 
-```powershell
-python nowwatching.py
-```
-
-Windows users can double-click `run.cmd`. Standard library only, so there is
-nothing to `pip install`.
+It registers nowwatching to start at every login and starts it straight away, so
+there is nothing to remember and nothing to launch again. No admin rights: it
+writes one `HKCU\...\Run` entry, the same mechanism Discord and Spotify use for
+themselves.
 
 **3. Play something.**
 
-That is the whole setup. Presence appears within a few seconds.
+That is the whole setup. Presence appears within a few seconds, and keeps
+appearing after every reboot.
 
-The optional [browser extension](#the-browser-extension) improves what gets
-shown on sites that report their titles badly, but nothing above needs it.
+```powershell
+python nowwatching.py --status     # installed? running?
+python nowwatching.py --uninstall  # or double-click uninstall.cmd
+python nowwatching.py              # run in the foreground instead, to watch it
+```
+
+Standard library only, so there is nothing to `pip install`. The optional
+[browser extension](#the-browser-extension) improves what gets shown on sites
+that report their titles badly, but nothing above needs it.
+
+### What it costs to leave running
+
+Measured while idle, with nothing playing:
+
+| | |
+|---|---|
+| daemon (`pythonw`) | 29 MB |
+| media session helper (`powershell`) | 91 MB |
+| **total** | **120 MB** |
+| CPU | around 0.1% of one core |
+
+The helper is most of that, and it is PowerShell's own baseline rather than
+anything this project does: reading the media session means WinRT, which Python
+cannot reach without a dependency, so a hosted PowerShell process is the price
+of keeping the install dependency-free.
+
+If that bothers you, `"source": "extension"` drops the helper entirely and runs
+in about 29 MB, at the cost of needing the extension loaded and each site
+enabled.
 
 ---
 
@@ -478,9 +504,30 @@ is out of reach. Turn on **Read player frames** and reload the page.
 <details>
 <summary><b>"port 6788 is busy"</b></summary>
 
-Another copy is already running. The port is deliberately the single-instance
-lock. Change `port` in `config.json` (and in the popup) if something unrelated
-wants it.
+Another copy is already running, which after `install.cmd` is the normal state.
+The port is deliberately the single-instance lock, so the second copy exiting is
+it working correctly. `--status` will confirm. Change `port` in `config.json`
+(and in the popup) if something unrelated wants it.
+</details>
+
+<details>
+<summary><b>It stopped starting at login</b></summary>
+
+Check `python nowwatching.py --status`. If the autostart line points at a path
+that no longer exists, you moved the folder: re-run `install.cmd` to repoint it.
+`--status` says so explicitly when the recorded command and the current one
+disagree.
+
+Windows also disables startup entries from Task Manager's Startup tab, and
+nothing here can tell that has happened, so check there too.
+</details>
+
+<details>
+<summary><b>I want it running but not at login</b></summary>
+
+`uninstall.cmd` removes the login entry without touching anything else. Then
+launch it yourself whenever you want, with `run.cmd` or
+`python nowwatching.py`.
 </details>
 
 ---
