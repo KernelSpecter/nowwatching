@@ -955,7 +955,7 @@ def main(argv):
     rpc = DryRunRPC() if dry_run else DiscordRPC(cfg["client_id"])
     last_key = None
     last_start = None
-    last_rev = None           # identifies the report we last built from
+    last_report = None        # the report we last built an activity from
     pending = None
     last_push = 0.0
     idle_since = time.time()
@@ -977,17 +977,12 @@ def main(argv):
                 inbox.clear()
                 rep = None
 
-            if rep is not None:
-                # The extension wins whenever it is reporting. It has the page's
-                # own poster, and a url to take the season and episode from,
-                # which SMTC cannot offer at all.
-                rev = ("ext", at)
-            elif smtc_src is not None and source != "extension":
+            if rep is None and smtc_src is not None and source != "extension":
+                # The extension wins whenever it is reporting: it has the page's
+                # own poster and a url to take the season and episode from,
+                # neither of which SMTC can offer.
                 snap = smtc_src.snapshot()
                 rep = normalise(snap) if snap else None
-                rev = ("smtc", smtc_src.revision()) if rep is not None else None
-            else:
-                rev = None
 
             if rep is None:
                 if last_key is not None:
@@ -997,7 +992,7 @@ def main(argv):
                         except OSError:
                             rpc.close()
                     log("presence: cleared")
-                    last_key = last_start = last_rev = pending = None
+                    last_key = last_start = last_report = pending = None
                     STATUS["watching"] = None
                     STATUS["source"] = None
                     idle_since = time.time()
@@ -1008,32 +1003,35 @@ def main(argv):
 
             idle_since = time.time()
 
-            # Only rebuild when a genuinely new report arrived.
+            # Rebuild only when the report itself differs from the one we last
+            # built from. Comparing content, not arrival time, is what matters.
             #
-            # Rebuilding on every tick looks harmless but is not: `start` is
-            # derived as (now - position), so while a report sits unchanged in
-            # the inbox its derived start drifts forward with the wall clock,
-            # crosses SEEK_EPSILON after a few seconds, and republishes as
-            # though the user had seeked. A browser tab whose service worker
-            # went to sleep would then push every few seconds and walk into
-            # Discord's rate limit.
+            # `start` is derived as (now - position), so a source that repeats an
+            # identical position produces a start that creeps forward with the
+            # wall clock, crosses SEEK_EPSILON, and republishes as though the
+            # user had seeked. A stalled video or a sleeping service worker would
+            # do that every few seconds and walk straight into Discord's rate
+            # limit. An identical report is not news, so it is skipped.
             #
             # Nothing is lost by skipping: Discord animates the countdown
-            # client-side, so an unchanged report needs no traffic at all.
+            # client-side, so unchanged state needs no traffic at all. And while
+            # playback advances normally, position advances with it and the
+            # derived start stays put, so presence_key suppresses the push
+            # anyway.
+            # Fill in a poster the source could not supply. Answers from cache
+            # and schedules the lookup in the background, so this never blocks.
             #
-            # The SMTC path is safe to rebuild once per helper line because it
-            # extrapolates position from the moment it was measured, so its
-            # derived start does not drift between lines either.
-            if rev != last_rev:
-                last_rev = rev
-                # Fill in a poster the source could not supply. Answers from
-                # cache and schedules the lookup in the background, so this
-                # never blocks; the art lands on a later push.
-                if meta is not None and not rep.get("poster"):
-                    found = meta.poster_for(rep["title"], rep["kind"],
-                                            rep.get("year"))
-                    if found:
-                        rep = dict(rep, poster=found)
+            # Done BEFORE the comparison, so the arriving poster is itself a
+            # change worth rebuilding for. Enriching afterwards would mean a
+            # source repeating one identical report never picked its art up.
+            if meta is not None and not rep.get("poster"):
+                found = meta.poster_for(rep["title"], rep["kind"],
+                                        rep.get("year"))
+                if found:
+                    rep = dict(rep, poster=found)
+
+            if rep != last_report:
+                last_report = dict(rep)
                 activity = build_activity(rep, cfg)
                 key = presence_key(activity)
                 start = (activity.get("timestamps") or {}).get("start")
