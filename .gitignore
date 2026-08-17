@@ -1,0 +1,15 @@
+# Runtime state: the log, which records every title you watch.
+# This is your watch history. Never commit it.
+run/
+
+__pycache__/
+*.pyc
+
+# Build output. A packaged exe is a release asset, not a tracked file.
+build/
+dist/
+*.exe
+*.spec
+
+# Local overrides. config.json itself IS tracked (it ships working).
+config.local.json

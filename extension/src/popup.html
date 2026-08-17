@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <span class="brand"><span class="dot" id="dot"></span> NowWatching</span>
+    <span class="pill" id="bridge">bridge?</span>
+  </header>
+
+  <section class="card" id="card">
+    <div class="card-head" id="cardHead">Nothing playing</div>
+    <div class="card-sub" id="cardSub">Start something on an enabled site</div>
+  </section>
+
+  <section class="here">
+    <div class="row">
+      <div class="host" id="host">this page</div>
+      <button class="btn" id="toggleSite">Enable</button>
+    </div>
+    <div class="hint" id="hereHint"></div>
+  </section>
+
+  <section class="opt">
+    <label class="opt-row">
+      <span>
+        <span class="opt-title">Read player frames</span>
+        <span class="opt-sub">Needed for the countdown when the player sits in
+          a third-party iframe. Grants access to all sites; the collector stays
+          inert unless the tab is an enabled site.</span>
+      </span>
+      <label class="switch small">
+        <input type="checkbox" id="probe" />
+        <span class="slider"></span>
+      </label>
+    </label>
+  </section>
+
+  <section class="sites">
+    <div class="sites-title">Enabled sites</div>
+    <div class="chips" id="chips"></div>
+  </section>
+
+  <section class="tools">
+    <button class="btn ghost" id="inspect">Inspect page</button>
+    <label class="port">
+      port
+      <input type="number" id="port" min="1" max="65535" />
+    </label>
+  </section>
+
+  <pre class="out" id="out" hidden></pre>
+
+  <footer>
+    <span class="state" id="state">idle</span>
+    <a id="repo" href="#" target="_blank" rel="noopener">GitHub &#8599;</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "NowWatching",
+  "version": "0.1.0",
+  "description": "Discord Rich Presence for streaming sites. Shows the show or film you are actually watching, with poster art and a live countdown.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "NowWatching",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "permissions": ["storage", "scripting", "activeTab"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "optional_host_permissions": ["*://*/*"]
+}

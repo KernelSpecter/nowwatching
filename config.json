@@ -1,0 +1,16 @@
+{
+  "client_id": "",
+
+  "port": 6788,
+
+  "activity_type": 3,
+  "header_mode": "title",
+  "timestamp_mode": "remaining",
+
+  "show_poster": true,
+  "show_site": false,
+  "show_status_icon": false,
+
+  "idle_clear_seconds": 40,
+  "debug": false
+}

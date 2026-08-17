@@ -1,0 +1,12 @@
+# Normalize to LF in the repository by default.
+* text=auto
+
+# Batch files are read by cmd.exe, which wants CRLF. A LF-only .cmd mostly
+# works but mangles multi-line constructs, so pin it.
+*.cmd text eol=crlf
+
+# PowerShell on Windows is conventionally CRLF.
+*.ps1 text eol=crlf
+
+# Binary, so keep git from touching line endings inside them.
+*.png binary
