@@ -67,6 +67,21 @@ def base_dir():
 HERE = base_dir()
 RUN_DIR = HERE / "run"
 LOG_FILE = RUN_DIR / "nowwatching.log"
+CACHE_FILE = RUN_DIR / "metadata-cache.json"
+
+# Optional siblings, imported by path so a frozen build finds them too. Either
+# can be absent and the daemon still runs with whatever sources remain: no smtc
+# means extension-only, no metadata means posters only from the extension.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+try:
+    import smtc
+except ImportError:
+    smtc = None
+try:
+    import metadata as metadata_mod
+except ImportError:
+    metadata_mod = None
 
 MIN_PUSH_INTERVAL = 4.0   # seconds between SET_ACTIVITY pushes
 SEEK_EPSILON = 2.5        # position drift that counts as a seek, not playback
@@ -75,6 +90,11 @@ MAX_TEXT = 128            # Discord's limit on name/details/state
 DEFAULT_CONFIG = {
     "client_id": "",
     "port": 6788,
+
+    # auto      both sources, extension preferred when it is reporting
+    # extension  browser only
+    # smtc       Windows media session only, no extension needed
+    "source": "auto",
 
     "activity_type": 3,
     "header_mode": "title",
@@ -86,6 +106,18 @@ DEFAULT_CONFIG = {
     "status_icon_keys": {"playing": "playing", "paused": "paused"},
 
     "paused_label": "Paused",
+
+    # Poster art. The extension supplies one directly from the page; the SMTC
+    # path has only a title, so it needs a lookup. TMDB covers film and TV and
+    # wants a free key; without one, AniList still covers anime keylessly.
+    "poster_lookup": True,
+    "tmdb_api_key": "",
+
+    # SMTC tuning. The duration floor is what stops a seven second reel
+    # publishing as though it were something you sat down to watch.
+    "smtc_min_duration": 60,
+    "smtc_interval": 1.0,
+    "smtc_ignore_apps": list(smtc.DEFAULT_IGNORE_APPS) if smtc else [],
 
     "idle_clear_seconds": 40,
     "idle_exit_seconds": 0,
@@ -134,10 +166,16 @@ def use_utf8_stdout():
 
     Only needed for the paths that print titles (--dry-run, --test). The real
     Discord path is already safe: json.dumps escapes to \\uXXXX first.
+
+    line_buffering matters as much as the encoding. Python block-buffers stdout
+    whenever it is not a terminal, so piping --test to a file or another process
+    showed nothing at all until the run ended ninety seconds later, which reads
+    exactly like a hang.
     """
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, OSError):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace",
+                               line_buffering=True)
+    except (AttributeError, OSError, ValueError):
         pass
 
 
@@ -500,6 +538,7 @@ STATUS = {
     "version": VERSION,
     "discord": False,
     "watching": None,
+    "source": None,          # which source the current presence came from
     "pushes": 0,
 }
 
@@ -890,10 +929,33 @@ def main(argv):
         print(f"nowwatching {VERSION} dry-run, listening on 127.0.0.1:{port}",
               flush=True)
 
+    source = str(cfg.get("source", "auto")).lower()
+
+    smtc_src = None
+    if smtc is not None and source in ("auto", "smtc"):
+        smtc_src = smtc.SmtcSource(
+            log,
+            min_duration=cfg.get("smtc_min_duration", 60),
+            ignore_apps=cfg.get("smtc_ignore_apps"),
+            interval=cfg.get("smtc_interval", 1.0),
+        )
+        if not smtc_src.start():
+            smtc_src = None
+            if source == "smtc":
+                log("FATAL: source is 'smtc' but the media session is unavailable")
+                print("nowwatching: SMTC unavailable (Windows only). "
+                      "Set source to 'extension' or 'auto'.", file=sys.stderr)
+                return 1
+
+    meta = None
+    if metadata_mod is not None and cfg.get("poster_lookup", True):
+        meta = metadata_mod.Metadata(log, CACHE_FILE,
+                                     tmdb_key=cfg.get("tmdb_api_key", ""))
+
     rpc = DryRunRPC() if dry_run else DiscordRPC(cfg["client_id"])
     last_key = None
     last_start = None
-    last_at = None            # arrival time of the report we last built from
+    last_rev = None           # identifies the report we last built from
     pending = None
     last_push = 0.0
     idle_since = time.time()
@@ -915,6 +977,18 @@ def main(argv):
                 inbox.clear()
                 rep = None
 
+            if rep is not None:
+                # The extension wins whenever it is reporting. It has the page's
+                # own poster, and a url to take the season and episode from,
+                # which SMTC cannot offer at all.
+                rev = ("ext", at)
+            elif smtc_src is not None and source != "extension":
+                snap = smtc_src.snapshot()
+                rep = normalise(snap) if snap else None
+                rev = ("smtc", smtc_src.revision()) if rep is not None else None
+            else:
+                rev = None
+
             if rep is None:
                 if last_key is not None:
                     if rpc.connected:
@@ -923,8 +997,9 @@ def main(argv):
                         except OSError:
                             rpc.close()
                     log("presence: cleared")
-                    last_key = last_start = last_at = pending = None
+                    last_key = last_start = last_rev = pending = None
                     STATUS["watching"] = None
+                    STATUS["source"] = None
                     idle_since = time.time()
                 if idle_exit > 0 and time.time() - idle_since > idle_exit:
                     log("daemon: idle timeout, exiting")
@@ -945,8 +1020,20 @@ def main(argv):
             #
             # Nothing is lost by skipping: Discord animates the countdown
             # client-side, so an unchanged report needs no traffic at all.
-            if at != last_at:
-                last_at = at
+            #
+            # The SMTC path is safe to rebuild once per helper line because it
+            # extrapolates position from the moment it was measured, so its
+            # derived start does not drift between lines either.
+            if rev != last_rev:
+                last_rev = rev
+                # Fill in a poster the source could not supply. Answers from
+                # cache and schedules the lookup in the background, so this
+                # never blocks; the art lands on a later push.
+                if meta is not None and not rep.get("poster"):
+                    found = meta.poster_for(rep["title"], rep["kind"],
+                                            rep.get("year"))
+                    if found:
+                        rep = dict(rep, poster=found)
                 activity = build_activity(rep, cfg)
                 key = presence_key(activity)
                 start = (activity.get("timestamps") or {}).get("start")
@@ -960,8 +1047,9 @@ def main(argv):
                     continue
                 try:
                     rpc.set_activity(pending)
-                    log(f"presence: {describe(pending)}")
+                    log(f"presence: {describe(pending)}  [{rep.get('adapter')}]")
                     STATUS["watching"] = describe(pending)
+                    STATUS["source"] = rep.get("adapter") or None
                     STATUS["pushes"] += 1
                     last_push = time.time()
                     pending = None
@@ -970,6 +1058,8 @@ def main(argv):
     except KeyboardInterrupt:
         pass
     finally:
+        if smtc_src is not None:
+            smtc_src.stop()
         if rpc.connected:
             try:
                 rpc.set_activity(None)
@@ -980,15 +1070,25 @@ def main(argv):
     return 0
 
 
-USAGE = f"""nowwatching {VERSION} - Discord Rich Presence for streaming sites
+USAGE = f"""nowwatching {VERSION} - Discord Rich Presence for what you are watching
 
   python nowwatching.py              run the bridge (this is the normal case)
   python nowwatching.py --test       publish one sample card, no browser needed
   python nowwatching.py --dry-run    print payloads, never contacting Discord
   python nowwatching.py --port 6789  listen somewhere else
 
-Needs the Discord desktop app running, and the browser extension in
-extension/ loaded. Standard library only, nothing to pip install.
+Two sources feed it, and `source` in config.json picks between them:
+
+  smtc       the Windows media session. Nothing to install: play anything in
+             any browser (or VLC, or any SMTC app) and it appears. Title
+             quality is whatever the site reports, which some sites do badly.
+  extension  the browser extension in extension/. Needs loading and a
+             per-site grant, and in exchange gets the page's own poster and
+             reads the season and episode from the url.
+  auto       both, preferring the extension whenever it is reporting.
+
+Needs the Discord desktop app running. Standard library only, nothing to
+pip install.
 """
 
 

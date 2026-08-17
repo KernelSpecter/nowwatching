@@ -50,7 +50,13 @@ function renderBridge(state) {
   if (watching) {
     const [head, ...rest] = String(watching).split(" | ");
     setCard(head, rest.join(" · ") || "playing");
-    $("state").textContent = "publishing";
+    // Naming the source makes it obvious whether this card came from the
+    // extension or from the Windows media session, which is the first thing
+    // you want to know when the title looks wrong.
+    const src = state.status.source || "";
+    $("state").textContent = src.startsWith("smtc")
+      ? `publishing (${src.replace("smtc:", "media session, ")})`
+      : "publishing (extension)";
     $("state").className = "state on";
   } else if (!state.bridgeOk) {
     setCard("Bridge not running", `Start it: python nowwatching.py`);
