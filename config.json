@@ -14,8 +14,9 @@
   "poster_lookup": true,
   "tmdb_api_key": "",
 
+  "require_match": true,
   "smtc_min_duration": 60,
-  "smtc_stall_seconds": 10,
+  "smtc_stall_seconds": 0,
   "strip_words": [],
 
   "idle_clear_seconds": 40,

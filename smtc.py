@@ -256,11 +256,14 @@ class SmtcSource:
     """
 
     def __init__(self, log, min_duration=60.0, ignore_apps=None,
-                 interval=1.0, site_words=None, stall_seconds=10.0):
+                 interval=1.0, site_words=None, stall_seconds=0.0,
+                 ignore_sources=None):
         self.log = log
         self.site_words = tuple(site_words or ())
         self.min_duration = float(min_duration)
         self.stall_seconds = float(stall_seconds)
+        self.ignore_sources = tuple(
+            s.lower() for s in (ignore_sources or ()) if s)
         self._pos_sig = None
         self._pos_sig_at = 0.0
         self.ignore_apps = tuple(
@@ -384,6 +387,17 @@ class SmtcSource:
         title = (msg.get("title") or "").strip()
         if len(title) < 2:
             return None
+
+        # Reject sources whose video is never a film or an episode. Tested
+        # against the RAW title and artist, because the site's own suffix is
+        # still there at this point ("Some Video - YouTube"); clean_title strips
+        # it, so this has to happen first.
+        haystack = f"{title} {msg.get('artist') or ''}".lower()
+        for bad in self.ignore_sources:
+            if bad in haystack:
+                self._warn_once(f"src:{bad}",
+                                f"smtc: ignoring {bad!r} as a source")
+                return None
 
         duration = msg.get("duration")
         if isinstance(duration, (int, float)) and duration > 0:

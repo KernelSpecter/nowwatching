@@ -162,6 +162,36 @@ The two do not produce identical cards. `smtc` needs no setup and covers
 everything; `extension` is more accurate on every field it can see. That is why
 `auto` prefers the extension rather than treating them as equals.
 
+### Only films and series
+
+"Covers everything" is a problem, not a feature. The media session reports every
+video on the machine, and a card reading "Watching Series" over a YouTube tab is
+worse than no card at all.
+
+So `require_match` (on by default) publishes only titles that can be identified
+as a film or a show. A database hit is the test: a real film or series is in
+TVmaze, Wikipedia or TMDB, and a video essay is not. Measured against real titles
+out of this machine's own session log:
+
+| Title | Result |
+|---|---|
+| `Govt Opposes 'Creamy Layer' in SC, ST Reservations` | no match, not published |
+| `lofi hip hop radio - beats to relax study to` | no match, not published |
+| `Instagram` | no match, not published |
+| `The Mentalist` | TVmaze, published |
+| `Blade Runner 2049` | Wikipedia, published |
+
+There is also `smtc_ignore_sources`, a list matched against the raw title and
+artist. It only catches sites that *fail* to set Media Session metadata, where
+Chromium falls back to a page title carrying the site's own name. YouTube sets its
+metadata correctly, so its titles have no telltale suffix and that list cannot
+see them: `require_match` is what actually stops them.
+
+The gate applies to the media session only. The extension needs no such test,
+because it only ever reports sites you explicitly enabled, which is a hard
+guarantee rather than a heuristic. If you want certainty about what can appear,
+that is the reason to use it.
+
 ## Not leaving it running
 
 `install.cmd` is the low-effort path, not the only one. If you would rather not
@@ -291,9 +321,11 @@ apart from `client_id`.
 | `show_status_icon` | `false` | Small play/pause badge. Needs uploaded assets; see below. |
 | `poster_lookup` | `true` | Look up posters the source could not supply |
 | `tmdb_api_key` | *(empty)* | Optional. Better matching and art than the keyless providers. |
+| `require_match` | `true` | Publish only what a database says is a film or a series |
 | `smtc_min_duration` | `60` | Ignore anything shorter, so a reel or an ad is not announced |
-| `smtc_stall_seconds` | `10` | Treat a timeline frozen this long as paused. 0 disables. |
+| `smtc_stall_seconds` | `0` | Treat a timeline frozen this long as paused. Off; see below. |
 | `smtc_ignore_apps` | Spotify, Groove, ... | Apps whose media is listened to, not watched |
+| `smtc_ignore_sources` | YouTube, Twitch, ... | Sources whose video is never a film |
 | `strip_words` | `[]` | Site names to cut out of titles. See below. |
 | `idle_clear_seconds` | `40` | Clear presence after this long without a report |
 | `idle_exit_seconds` | `0` | Self-exit after this long idle. 0 never exits. |
@@ -497,17 +529,38 @@ most pre-rolls but not a long ad break.
 </details>
 
 <details>
-<summary><b>The countdown keeps running after I pause</b></summary>
+<summary><b>It says paused when I switch tabs, but it is still playing</b></summary>
 
-Some players never update their media session status when you pause, especially
-once the tab is no longer in the foreground. The reported position freezes but
-the status still claims to be playing, so Discord animates a countdown that has
-nothing to do with what is on screen.
+That was `smtc_stall_seconds`, and it now defaults to `0`, meaning off. Set it
+back to `0` if you turned it on.
 
-A timeline that has not moved for `smtc_stall_seconds` (10 by default) is
-therefore treated as paused. Lower it if pauses take too long to register, and
-check `run/nowwatching.log` for the line about the timeline having stopped
-moving.
+The reasoning behind it was wrong. Chromium stops pushing timeline updates for a
+**background** tab while playback carries on perfectly happily, so a frozen
+timeline means "you switched away", not "you paused". Treating it as a pause made
+switching tabs claim the episode had stopped.
+
+It is kept as an opt-in for a player that genuinely never reports a pause, which
+is a real thing but rarer than a background tab.
+</details>
+
+<details>
+<summary><b>It showed a YouTube video, or something that is not a film</b></summary>
+
+The media session sees every video on the machine, so `require_match` filters it
+down to titles a database recognises as a film or a series. Check it is `true`.
+
+If something still slips through, add a distinctive word from it to
+`smtc_ignore_sources`. And if you want a hard guarantee instead of a heuristic,
+use the extension: it only ever reports sites you explicitly enabled.
+</details>
+
+<details>
+<summary><b>Nothing appears for a film I know is real</b></summary>
+
+`require_match` needs a database to recognise the title, so a bad title from the
+site defeats it. Run `python smtc.py` to see what the parsed title actually is.
+Add a `tmdb_api_key` for better matching, or set `"require_match": false` to
+publish whatever is playing and accept the odd YouTube tab.
 </details>
 
 <details>

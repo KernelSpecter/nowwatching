@@ -122,9 +122,33 @@ DEFAULT_CONFIG = {
     # publishing as though it were something you sat down to watch.
     "smtc_min_duration": 60,
     "smtc_interval": 1.0,
-    # Treat a timeline that has not moved for this long as paused, for the sites
-    # that never report a Paused status of their own. 0 disables it.
-    "smtc_stall_seconds": 10,
+    # Treat a timeline that has not moved for this long as paused. OFF by
+    # default, and it should stay off unless you have a player that genuinely
+    # never reports a pause.
+    #
+    # It was on once and was wrong: Chromium stops pushing timeline updates for
+    # a BACKGROUND tab while playback carries on perfectly happily, so a frozen
+    # timeline means "you switched tabs", not "you paused". Switching away from
+    # a playing episode made the card claim it was paused.
+    "smtc_stall_seconds": 0,
+
+    # Only publish when the title can be identified as a film or a series.
+    #
+    # The media session sees every video on the machine, including YouTube,
+    # Twitch and a random clip in a background tab, and none of that belongs on
+    # a card that says "Watching Series". A database hit is the test: a film or
+    # show is in TVmaze, Wikipedia or TMDB, and a video essay is not.
+    #
+    # Applies to the media session source only. The extension already answers
+    # this properly, because it only ever reports sites you enabled.
+    "require_match": True,
+
+    # Sources whose video is never a film or an episode. Matched against the
+    # RAW title before cleaning, since that is where the site's own suffix
+    # still is ("Some Video - YouTube").
+    "smtc_ignore_sources": ["youtube", "twitch", "vimeo", "dailymotion",
+                            "instagram", "facebook", "tiktok", "reddit",
+                            "x.com", "twitter"],
     "smtc_ignore_apps": list(smtc.DEFAULT_IGNORE_APPS) if smtc else [],
 
     # Site names to cut out of a title. The general rules catch anything with a
@@ -1167,7 +1191,8 @@ def main(argv):
             ignore_apps=cfg.get("smtc_ignore_apps"),
             interval=cfg.get("smtc_interval", 1.0),
             site_words=cfg.get("strip_words"),
-            stall_seconds=cfg.get("smtc_stall_seconds", 10),
+            stall_seconds=cfg.get("smtc_stall_seconds", 0),
+            ignore_sources=cfg.get("smtc_ignore_sources"),
         )
         if not smtc_src.start():
             smtc_src = None
@@ -1254,7 +1279,9 @@ def main(argv):
             # Done BEFORE the comparison, so the arriving poster is itself a
             # change worth rebuilding for. Enriching afterwards would mean a
             # source repeating one identical report never picked its art up.
-            if meta is not None and (not rep.get("poster") or not rep.get("kind")):
+            from_smtc = str(rep.get("adapter") or "").startswith("smtc")
+            info = None
+            if meta is not None:
                 info = meta.info_for(rep["title"], rep["kind"], rep.get("year"))
                 if info:
                     patch = {}
@@ -1266,6 +1293,36 @@ def main(argv):
                         patch["kind"] = info["kind"]
                     if patch:
                         rep = dict(rep, **patch)
+
+            # Publish only what can be identified as a film or a series.
+            #
+            # The media session reports every video on the machine, and a card
+            # reading "Watching Series" over a YouTube tab is worse than no card
+            # at all. A database hit is the test: a real film or show is in
+            # TVmaze, Wikipedia or TMDB; a video essay is not.
+            #
+            # Only the media session needs this gate. The extension already
+            # answers the question properly, by only reporting enabled sites.
+            if from_smtc and cfg.get("require_match", True):
+                if meta is None:
+                    pass                  # no way to check, so do not block
+                elif info is None:
+                    # Either the lookup is still in flight or it definitively
+                    # missed. Both mean "not known to be a film or a show", so
+                    # nothing is published. A pending lookup resolves within a
+                    # second or two and the card appears then.
+                    if last_key is not None:
+                        if rpc.connected:
+                            try:
+                                rpc.set_activity(None)
+                            except OSError:
+                                rpc.close()
+                        log(f"presence: cleared, {rep['title']!r} is not a "
+                            f"known film or series")
+                        last_key = last_start = last_report = pending = None
+                        STATUS["watching"] = None
+                        STATUS["source"] = None
+                    continue
 
             if rep != last_report:
                 last_report = dict(rep)
