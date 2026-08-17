@@ -91,10 +91,59 @@ var NW_ADAPTERS = globalThis.NW_ADAPTERS || (() => {
   // Separators sites use before their own name: "Breaking Bad | SiteName".
   const SEP = /\s+[|•·–—>]+\s+|\s+-\s+/;
 
+  // "... on Movies2Watch", "... at fmovies.to". These sites glue their own name
+  // onto the page title with no separator, so the segment split cannot reach it.
+  //
+  // The tail must look like a site rather than like English, or real titles lose
+  // their endings: "Girl on Fire" has to survive. A digit inside the word
+  // ("Movies2Watch") or a domain suffix ("fmovies.to") is the tell.
+  //
+  // Kept deliberately identical to SITE_TAIL in smtc.py. The two parsers having
+  // drifted apart is what let this bug live on in the extension after it was
+  // fixed on the daemon side.
+  const SITE_TAIL =
+    /\s+(?:on|at|from)\s+(?:\w*\d\w*|[\w-]+\.(?:tv|to|com|net|org|cc|me|io|xyz|watch|club|site|online|film|movie|stream|pw|se|sx|ru|in|co))\s*$/i;
+
+  const BARE_DOMAIN =
+    /\b[\w-]+\.(?:tv|to|com|net|org|cc|me|io|xyz|watch|club|site|online|film|movie|stream|pw|se|sx)\b/gi;
+
+  // A bracketed year. Captured separately and published as its own field, so
+  // leaving it in reads as though it were part of the name.
+  const YEAR_IN_TITLE = /[([]\s*(?:19|20)\d{2}\s*[)\]]/g;
+
+  /**
+   * Site names to remove, derived from the hostname we are actually on.
+   *
+   * This is something the media session source cannot do: it never learns the
+   * URL, so it has to fall back to a configured list. Here the site is simply
+   * known, so "movies2watch.vc" contributes both "movies2watch.vc" and
+   * "movies2watch" with nothing to configure.
+   */
+  function siteWords() {
+    const host = String(location.hostname || "").replace(/^www\./, "");
+    if (!host) return [];
+    const words = [host];
+    const base = host.split(".")[0];
+    if (base.length >= 3) words.push(base);
+    return words;
+  }
+
+  function stripWords(t, words) {
+    for (const w of words) {
+      const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      t = t.replace(new RegExp(`\\s*\\b(?:on|at|from)\\s+${esc}\\b`, "gi"), " ");
+      t = t.replace(new RegExp(`\\b${esc}\\b`, "gi"), " ");
+    }
+    return t;
+  }
+
   function cleanTitle(raw) {
     let t = String(raw || "");
 
     t = t.replace(/^\s*(watch|stream|play)\s+/i, "");
+    t = stripWords(t, siteWords());
+    t = t.replace(SITE_TAIL, " ");
+    t = t.replace(BARE_DOMAIN, " ");
 
     // Take the leading segment before a separator, but only if what remains is
     // still substantial. "Mr. Robot - Season 1" would otherwise become
@@ -103,6 +152,11 @@ var NW_ADAPTERS = globalThis.NW_ADAPTERS || (() => {
     if (head && head.trim().length >= 3) t = head;
 
     for (const re of NOISE) t = t.replace(re, " ");
+
+    // Again: both earlier passes only saw the string they were handed, and
+    // removing the noise is what finally leaves the site name at the end.
+    t = t.replace(SITE_TAIL, " ").replace(BARE_DOMAIN, " ");
+    t = t.replace(YEAR_IN_TITLE, " ");
 
     return t
       .replace(/\(\s*\)/g, " ")
@@ -118,7 +172,21 @@ var NW_ADAPTERS = globalThis.NW_ADAPTERS || (() => {
     /\/season[/-](\d{1,2})\/episode[/-](\d{1,4})/i,
     /\bseason[\s-]*(\d{1,2})[\s-]*episode[\s-]*(\d{1,4})\b/i,
     /\bs\s*(\d{1,2})\s*[:.\s]*\s*e\s*p?\s*(\d{1,4})\b/i,
-    /\bs(\d{1,2})x(\d{1,4})\b/i,
+    // "s3x10" and the bare "3x10" that fan listings use. The episode half is
+    // capped at three digits so a resolution ("1920x1080") cannot match. The `s`
+    // was mandatory here long after it had been made optional in smtc.py, so the
+    // bare form worked on the daemon and silently failed in the extension.
+    /\bs?(\d{1,2})x(\d{1,3})\b/i,
+    // A bare "<season>-<episode>" path segment, which is how the
+    // movies2watch family addresses an episode:
+    //   /series/the-mentalist-12123/1-8/   ->  season 1, episode 8
+    //
+    // Anchored on a slash so the numeric id in the slug cannot match, and the
+    // season half is capped at two digits so a "/2024-08/" date cannot either
+    // (four digits will not fit, and the match has to start right after a
+    // slash). Deliberately last, so any explicit "season/episode" wording in
+    // the URL wins over this shape.
+    /\/(\d{1,2})-(\d{1,4})(?:\/|$|\?|#)/,
   ];
 
   // Episode only, for sites that keep the season in a separate control.
@@ -212,6 +280,39 @@ var NW_ADAPTERS = globalThis.NW_ADAPTERS || (() => {
     return best && /^https?:\/\//i.test(best) ? best : null;
   }
 
+  /**
+   * Recover a show name from a URL slug.
+   *
+   *   /series/the-mentalist-12123/1-8/  ->  "The Mentalist"
+   *
+   * A last resort, not a first choice: the trailing numeric id has to be
+   * guessed off, and hyphens inside a real name are lost ("spider-man" comes
+   * back as "Spider Man"). The page's own heading is always better when there
+   * is one. Its value is that it is immune to the SEO wrapping that makes page
+   * titles unreliable on these sites.
+   */
+  function slugTitle(path) {
+    const parts = String(path || "").split("/").filter(Boolean);
+    // The slug sits before the season-episode segment, so walk back to the
+    // last part that is not purely numeric or "<num>-<num>".
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i];
+      if (/^\d+(-\d+)?$/.test(p)) continue;
+      if (/^(series|tv|show|movie|movies|watch|episode|season)$/i.test(p)) {
+        continue;
+      }
+      const words = p
+        .replace(/-\d+$/, "")        // trailing site id
+        .split("-")
+        .filter(Boolean);
+      if (!words.length) continue;
+      return words
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+    }
+    return "";
+  }
+
   // ---- kind --------------------------------------------------------------
 
   function findKind(haystacks) {
@@ -285,7 +386,11 @@ var NW_ADAPTERS = globalThis.NW_ADAPTERS || (() => {
           .trim();
 
         return {
-          title: cleanTitle(title || metaTag("og:title") || document.title),
+          // The URL slug is the last fallback, after the page's own heading and
+          // og:title, both of which keep punctuation the slug has thrown away.
+          title:
+            cleanTitle(title || metaTag("og:title") || document.title) ||
+            slugTitle(location.pathname),
           kind: se.season || se.episode || epRaw ? "series" : findKind(haystacks),
           season: se.season,
           episode: se.episode,
@@ -316,7 +421,9 @@ var NW_ADAPTERS = globalThis.NW_ADAPTERS || (() => {
         const se = findSeasonEpisode(haystacks);
 
         return {
-          title: cleanTitle(ogTitle || document.title),
+          title:
+            cleanTitle(ogTitle || document.title) ||
+            slugTitle(location.pathname),
           kind: findKind(haystacks),
           season: se.season,
           episode: se.episode,
@@ -358,7 +465,8 @@ var NW_ADAPTERS = globalThis.NW_ADAPTERS || (() => {
     return out;
   }
 
-  return { read, pick, cleanTitle, findSeasonEpisode, findPoster, ADAPTERS };
+  return { read, pick, cleanTitle, findSeasonEpisode, findPoster, slugTitle,
+           findKind, ADAPTERS };
 })();
 
 globalThis.NW_ADAPTERS = NW_ADAPTERS;

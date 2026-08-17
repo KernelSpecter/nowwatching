@@ -469,7 +469,27 @@ Open the popup and press **Inspect page** to see exactly what the adapters saw:
 
 If `generic` already gets it right there is nothing to add. It reads OpenGraph
 tags plus the URL, which most streaming sites populate correctly because they
-want link previews to work.
+want link previews to work. The URL is usually the richest source: the
+movies2watch family addresses an episode as
+
+```
+/series/the-mentalist-12123/1-8/     ->  season 1, episode 8
+```
+
+and a bare `<season>-<episode>` segment like that is understood, as are
+`/season/5/episode/14`, `s05e14` and `3x10`. The slug also serves as a last-resort
+title when the page offers nothing usable.
+
+There are tests, and they need no browser:
+
+```powershell
+node extension/tests/adapters.test.js
+```
+
+They stub `document` and `location` and exercise the URL and title parsing
+directly, which is where the breakage actually happens. Worth running before
+sending a change: they caught this parser and the daemon's having quietly drifted
+apart, with a fix applied to one and not the other.
 
 If not, copy the `sflix-family` block in
 [`extension/src/adapters.js`](extension/src/adapters.js), change `detect()` to
