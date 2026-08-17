@@ -159,15 +159,35 @@ def log(msg):
 
 
 def load_config():
+    """Read config.json, falling back to defaults on anything unreadable.
+
+    utf-8-sig, not utf-8: Notepad and several PowerShell cmdlets write a UTF-8
+    byte order mark, and strict utf-8 chokes on it. The failure is nasty because
+    it is silent in effect: the file looks perfectly fine, the daemon reports
+    "bad config.json" once to a stderr nobody is reading, and then runs with
+    every setting reverted. utf-8-sig accepts a BOM and its absence equally.
+    """
     cfg = dict(DEFAULT_CONFIG)
+    path = HERE / "config.json"
     try:
-        with open(HERE / "config.json", encoding="utf-8") as fh:
-            cfg.update(json.load(fh))
+        with open(path, encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+        if not isinstance(loaded, dict):
+            raise ValueError("top level is not an object")
+        cfg.update(loaded)
     except FileNotFoundError:
         pass
     except (OSError, ValueError) as e:
-        print(f"nowwatching: bad config.json ({e}); using defaults",
-              file=sys.stderr)
+        # Loud, and to the log as well, because the daemon usually runs detached
+        # with no stderr attached to anything.
+        msg = f"nowwatching: bad config.json ({e}); using defaults"
+        print(msg, file=sys.stderr)
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+            with open(LOG_FILE, "a", encoding="utf-8") as fh:
+                fh.write(f"{time.strftime('%H:%M:%S')} FATAL-ISH: {msg}\n")
+        except OSError:
+            pass
     return cfg
 
 

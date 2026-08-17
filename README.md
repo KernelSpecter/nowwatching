@@ -133,17 +133,57 @@ Ozymandias - Paused at 25:00 / 40:24
 
 ## Two sources
 
-`source` in `config.json` picks between them. The default, `auto`, runs both and
-prefers the extension whenever it is reporting.
+> [!IMPORTANT]
+> **The extension is not an alternative to the daemon, it is an input to it.**
+> Rich Presence is a local IPC socket and a browser extension cannot open one,
+> so the extension POSTs to `nowwatching.py`, which does the talking to Discord.
+> Running the extension means running *both*. Nothing here lets you skip the
+> background process; see [Not leaving it running](#not-leaving-it-running).
+
+`source` in `config.json` picks where reports come from. The default, `auto`,
+accepts both and prefers the extension whenever it is reporting, because it is
+strictly better informed.
 
 | | `smtc` | `extension` |
 |---|---|---|
-| Setup | none | load unpacked, grant each site |
-| Title | whatever the site reports to Windows | the page's own `og:title` and DOM |
-| Season and episode | parsed out of the title string | read from the URL, which is exact |
-| Poster | looked up by name | the page's own `og:image`, exact |
+| Needs the daemon | yes | yes |
+| Extra setup | none | load unpacked, grant each site |
+| Idle memory | about 120 MB | about 27 MB |
+| Title | whatever the site reports to Windows, sometimes just the site name | the page's own `og:title` and DOM |
+| Season and episode | guessed from the title string | read from the URL, exact |
+| Episode name | not available | the active episode's own label |
+| Poster | looked up by name, and can mismatch | the page's own `og:image`, cannot mismatch |
 | Quality | not available | `video.videoHeight` |
-| Covers | any browser, plus VLC, and anything else with a media session | only sites you enable |
+| Film or series | runtime and a database guess | `og:type` and the URL |
+| Pause | inferred when the timeline stops moving | the real `video.paused` |
+| Covers | any browser, plus VLC and anything else with a media session | only sites you enable |
+
+The two do not produce identical cards. `smtc` needs no setup and covers
+everything; `extension` is more accurate on every field it can see. That is why
+`auto` prefers the extension rather than treating them as equals.
+
+## Not leaving it running
+
+`install.cmd` is the low-effort path, not the only one. If you would rather not
+have it resident:
+
+**Run it only when you want it.** Skip `install.cmd` entirely (or undo it with
+`uninstall.cmd`) and double-click `run.cmd` when you sit down to watch
+something. Close the window when you are done.
+
+**Let it clean up after itself.** Set `idle_exit_seconds` and the daemon exits
+once nothing has been playing for that long:
+
+```json
+{ "idle_exit_seconds": 600 }
+```
+
+Combined with launching it by hand, that means it is running only while it has
+something to do. It defaults to `0`, meaning never exit, because that is the
+right default for the autostart case.
+
+Note that neither of these lets the extension work on its own. The extension
+needs something listening on the port.
 
 **`smtc`** reads the Windows System Media Transport Controls session. Every
 Chromium tab playing video registers one, which makes it the browser-side
