@@ -87,6 +87,14 @@ except ImportError:
 
 MIN_PUSH_INTERVAL = 4.0   # seconds between SET_ACTIVITY pushes
 SEEK_EPSILON = 2.5        # position drift that counts as a seek, not playback
+
+# While paused, republish this often to re-anchor the progress bar.
+#
+# Discord animates timestamps client-side and cannot be told to stop, so a bar
+# anchored once at the moment of the pause slowly creeps away from the true
+# position. Re-sending the same position resets it. Once a minute is far below
+# Discord's rate limit and keeps the bar honest.
+PAUSED_REANCHOR_INTERVAL = 60.0
 MAX_TEXT = 128            # Discord's limit on name/details/state
 
 DEFAULT_CONFIG = {
@@ -859,12 +867,22 @@ def build_activity(rep, cfg):
         _set(activity, "details", named)
         _set(activity, "state", where or heading)
 
-    # Discord animates timestamps client-side, so a paused card would keep
-    # counting down on its own. Send them only while actually playing; the
-    # paused position is written into `where` above instead.
+    # Timestamps are sent while paused too, which is the opposite of the obvious
+    # choice and the obvious choice was wrong.
+    #
+    # Withholding them does not stop the card counting. Discord substitutes its
+    # own timer, measured from when the activity was set, so a paused card lost
+    # its progress bar and gained a green counter ticking up from zero that meant
+    # nothing at all. Verified by sending an activity with no timestamps field
+    # whatsoever: the counter still appeared.
+    #
+    # Since something always counts, it may as well be the truthful thing. Real
+    # timestamps give the correct position and a progress bar, and the "Paused
+    # at 25:00 / 40:24" text above states the frozen position exactly. The bar
+    # does creep while paused, which is what PAUSED_REANCHOR_INTERVAL is for.
     mode = cfg.get("timestamp_mode", "remaining")
     pos, dur = rep["position"], rep["duration"]
-    if mode != "off" and not paused and pos is not None:
+    if mode != "off" and pos is not None:
         start = int(time.time() - pos)
         if mode == "remaining" and dur and dur > pos:
             activity["timestamps"] = {"start": start, "end": int(start + dur)}
@@ -1324,12 +1342,17 @@ def main(argv):
                         STATUS["source"] = None
                     continue
 
-            if rep != last_report:
+            # A paused report never changes, so without this the bar anchored at
+            # the moment of the pause would drift for as long as the pause lasts.
+            reanchor = (rep.get("paused") and last_push
+                        and time.time() - last_push >= PAUSED_REANCHOR_INTERVAL)
+
+            if rep != last_report or reanchor:
                 last_report = dict(rep)
                 activity = build_activity(rep, cfg)
                 key = presence_key(activity)
                 start = (activity.get("timestamps") or {}).get("start")
-                if key != last_key or start_changed(start, last_start):
+                if key != last_key or start_changed(start, last_start) or reanchor:
                     pending = activity
                     last_key, last_start = key, start
 

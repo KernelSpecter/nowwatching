@@ -119,15 +119,30 @@ silent on the question, and a forty minute episode was previously being
 published as `Movie`. When nothing can settle it, the header says `Video` rather
 than guessing.
 
-**When paused**, Discord is sent no timestamps at all, because it animates them
-client-side and would otherwise count down over a stopped video. The position is
-written into the text instead, so it is not simply lost:
+**When paused**, the position is spelled out in the text, and the timestamps are
+still sent:
 
 ```
 Watching Series
 Breaking Bad - S5:E14
 Ozymandias - Paused at 25:00 / 40:24
 ```
+
+Sending them while paused looks wrong and is not. Withholding timestamps does
+not stop the card counting: Discord substitutes a timer of its own, measured from
+when the activity was set, so the card loses its progress bar and gains a counter
+ticking up from zero that means nothing. Measured against a live client:
+
+| `timestamps` sent | What Discord renders |
+|---|---|
+| field omitted | its own counter, counting up |
+| `{}` | its own counter, counting up |
+| `{start}` | its own counter, counting up |
+| `{start, end}` | a progress bar, and no counter |
+
+Only the pair suppresses it. Since something always counts, it may as well be
+the truthful thing, so a paused card keeps a real bar anchored at the real
+position and is re-anchored once a minute to stop it creeping.
 
 ---
 
