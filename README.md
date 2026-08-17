@@ -60,25 +60,48 @@ shown on sites that report their titles badly, but nothing above needs it.
 
 ---
 
-## Why the header says the show's name
+## The card
 
 Most Rich Presence tools cannot help announcing themselves. The bold top line
-of an activity card is the Discord application's name, so a tool built around
-one application ID reads "Watching Netflix" or "Watching SomeTool" no matter
-what is actually on screen.
+of an activity card is normally the Discord application's name, so a tool built
+around one application ID reads "Watching Netflix" or "Watching SomeTool" no
+matter what is on screen.
 
 `SET_ACTIVITY` turns out to accept a `name` field that overrides that line, so
-the header adapts per title:
+the card can say something useful instead:
 
 ```
-Watching Breaking Bad          Watching Blade Runner 2049
-S5:E14 - Ozymandias            2017 - Movie
-1080p                          1080p
+Watching Series                Watching Movie
+Breaking Bad - S5:E14          Blade Runner 2049
+Ozymandias - 1080p             2017 - 1080p
 28:14 left                     1:52:07 left
 ```
 
-Verified against the current Discord desktop client. If it ever regresses, set
-`"header_mode": "app"` and the title moves down a line instead.
+Verified against the current Discord desktop client. `header_mode` picks what
+goes on the top line:
+
+| `header_mode` | Top line |
+|---|---|
+| `kind` (default) | `Series`, `Movie`, or `Video` when genuinely unknown |
+| `title` | the show or film's own name |
+| `app` | the Discord application's name, no override |
+
+**Series or film is worked out, not assumed.** A season or episode number
+settles it. Failing that, runtime decides: twenty to seventy-five minutes is an
+episode, longer is a feature. That matters because a title on its own is usually
+silent on the question, and a forty minute episode was previously being
+published as `Movie`. When nothing can settle it, the header says `Video` rather
+than guessing.
+
+**When paused**, Discord is sent no timestamps at all, because it animates them
+client-side and would otherwise count down over a stopped video. The position is
+written into the text instead, so it is not simply lost:
+
+```
+Watching Series
+Breaking Bad - S5:E14
+Ozymandias - Paused at 25:00 / 40:24
+```
 
 ---
 
@@ -135,23 +158,52 @@ a URL rather than bytes, so it has to look one up.
 
 | Provider | Key | Covers |
 |---|---|---|
-| **TMDB** | free key | film and TV, properly |
-| **AniList** | none | anime only |
+| **TMDB** | free key | everything, and best of the four |
+| **TVmaze** | none | series |
+| **AniList** | none | anime |
+| **Wikipedia** | none | film and series |
 
-Put a TMDB key in `tmdb_api_key` and film and TV get posters. Without one,
-AniList still covers anime out of the box, and everything else simply shows no
-image.
+**No key is needed.** TVmaze and Wikipedia cover films and TV between them, so
+posters work out of the box. A TMDB key in `tmdb_api_key` upgrades the matching
+and the art, and is the only reason to bother.
 
-IMDb has no free public API, which is why it is not in that table. TMDB carries
-IMDb IDs for every title, so nothing is lost by going through it.
+Shipping one shared TMDB key for everybody was considered and rejected. It would
+sit in a public repo for anyone to extract, all users' traffic would run under
+one account, and a revocation would break the feature for every installed copy
+at once. The keyless providers remove the need for one.
 
-The keyless **iTunes Search** API was measured before being ruled out: 3 of 8
-test titles matched, one of those was an outright wrong match (`The Bear`
-resolved to an unrelated documentary), and every film missed. It is
-region-dependent and not usable here.
+IMDb is absent because it has no free public API. TMDB carries IMDb IDs for
+every title, so nothing is lost by going through it.
 
-Lookups run on a background thread and are cached in `run/`, so nothing about
-this ever delays a presence update.
+### Matching is guarded, because these searches are fuzzy
+
+Every keyless provider here will happily answer a question you did not ask, and
+each guard below exists because the unguarded version was measured getting it
+wrong:
+
+- **TVmaze** `/singlesearch/shows` returns its best fuzzy guess with no score
+  and no way to reject it. It answered "Blade Runner 2049" with the series
+  *Blade Runner 2099*, and every film in a test set came back looking like a
+  hit. Switching to `/search/shows` gives a relevance score: real series scored
+  1.19 to 1.61, films that merely fuzzy-matched scored 0.64 to 0.86, so the
+  threshold sits at 1.0.
+- **A show and a film can share a name.** TVmaze is right that a 1980 series
+  called *Oppenheimer* exists; it is just not the 2023 film. Only the year
+  separates them, so a year more than two out is rejected.
+- **Wikipedia** resolves "Parasite" to *Parasitism*, the biology article, and
+  would publish its illustration as poster art. Its summaries carry a
+  `description` field, so a match is only accepted when that description
+  actually describes a film or a series.
+- **iTunes Search** was measured and dropped entirely: 3 of 8 titles, one an
+  outright wrong match (*The Bear* to an unrelated bear documentary), and every
+  film missed.
+
+Which provider answers is itself useful: TVmaze and AniList hold nothing but
+shows, so a hit there proves the thing is a series even when the title never
+said so.
+
+Lookups run on a background thread and are cached in `run/`, so nothing here
+ever delays a presence update.
 
 ---
 
@@ -166,15 +218,17 @@ apart from `client_id`.
 | `source` | `"auto"` | `auto`, `smtc` or `extension`. See [Two sources](#two-sources). |
 | `port` | `6788` | Where the bridge listens for the extension. |
 | `activity_type` | `3` | 3 = Watching, 2 = Listening, 0 = Playing |
-| `header_mode` | `"title"` | `title` puts the show in the header; `app` falls back to the application name |
+| `header_mode` | `"kind"` | What goes on the top line. See [The card](#the-card). |
 | `timestamp_mode` | `"remaining"` | `remaining` gives "28:14 left" and a progress bar; `elapsed` counts up; `off` |
 | `show_poster` | `true` | Use poster art as the large image |
 | `show_site` | `false` | Publish the site you are watching on |
 | `show_status_icon` | `false` | Small play/pause badge. Needs uploaded assets; see below. |
 | `poster_lookup` | `true` | Look up posters the source could not supply |
-| `tmdb_api_key` | *(empty)* | Enables film and TV posters |
+| `tmdb_api_key` | *(empty)* | Optional. Better matching and art than the keyless providers. |
 | `smtc_min_duration` | `60` | Ignore anything shorter, so a reel or an ad is not announced |
+| `smtc_stall_seconds` | `10` | Treat a timeline frozen this long as paused. 0 disables. |
 | `smtc_ignore_apps` | Spotify, Groove, ... | Apps whose media is listened to, not watched |
+| `strip_words` | `[]` | Site names to cut out of titles. See below. |
 | `idle_clear_seconds` | `40` | Clear presence after this long without a report |
 | `idle_exit_seconds` | `0` | Self-exit after this long idle. 0 never exits. |
 | `debug` | `false` | Also log to stderr |
@@ -182,6 +236,29 @@ apart from `client_id`.
 `timestamp_mode: "remaining"` needs `activity_type` 2 or 3. Discord rejects an
 end timestamp on other types, and losing the timestamp loses the progress bar.
 With `0` (Playing), use `"elapsed"`.
+
+### Site names in titles
+
+Streaming sites bolt their own name onto the page title with no separator, so
+"Watch The Mentalist (2008) Online Free on Movies2Watch" arrives as the only
+title Windows knows. Two rules handle that automatically:
+
+- a trailing `on <name>` or `at <name>` where the name has a digit in it
+  (`Movies2Watch`) or a domain suffix (`fmovies.to`)
+- a bare domain anywhere in the title
+
+Both deliberately require the tail to look like a site rather than like English,
+or real titles lose their endings: *Girl on Fire* has to survive. That means a
+site whose name is a plain English word cannot be detected, so `strip_words` is
+the escape hatch:
+
+```json
+{ "strip_words": ["SomePlainName", "Another Mirror"] }
+```
+
+Chromium also puts the site's own origin in the media session's `artist` field on
+sites that set no metadata of their own. When it does, that string is used as a
+strip word automatically, with nothing to configure.
 
 ### The play/pause badge
 
@@ -354,11 +431,35 @@ most pre-rolls but not a long ad break.
 </details>
 
 <details>
-<summary><b>No poster on films</b></summary>
+<summary><b>The countdown keeps running after I pause</b></summary>
 
-Expected without a TMDB key: AniList is the only keyless provider and it covers
-anime only. Add `tmdb_api_key`, or load the extension, which takes the poster
-straight off the page.
+Some players never update their media session status when you pause, especially
+once the tab is no longer in the foreground. The reported position freezes but
+the status still claims to be playing, so Discord animates a countdown that has
+nothing to do with what is on screen.
+
+A timeline that has not moved for `smtc_stall_seconds` (10 by default) is
+therefore treated as paused. Lower it if pauses take too long to register, and
+check `run/nowwatching.log` for the line about the timeline having stopped
+moving.
+</details>
+
+<details>
+<summary><b>The site's name is stuck in the title</b></summary>
+
+Add it to `strip_words`. The automatic rules only fire on a tail that looks like
+a site, because anything looser eats real titles. See
+[Site names in titles](#site-names-in-titles).
+</details>
+
+<details>
+<summary><b>Wrong poster, or a poster for something else entirely</b></summary>
+
+The keyless providers all search fuzzily, and the guards described in
+[Poster art](#poster-art) reject what they can. A title with no year is the hard
+case, since a series and a film sharing a name can then only be told apart by
+which database answered. Add `tmdb_api_key` for better matching, or load the
+extension, which takes the poster straight off the page and cannot mismatch.
 </details>
 
 <details>

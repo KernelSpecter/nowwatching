@@ -97,7 +97,10 @@ DEFAULT_CONFIG = {
     "source": "auto",
 
     "activity_type": 3,
-    "header_mode": "title",
+    # kind   header reads "Watching Series", title on the line below
+    # title  header is the title itself
+    # app    header is the Discord application's name (no override)
+    "header_mode": "kind",
     "timestamp_mode": "remaining",
 
     "show_poster": True,
@@ -117,7 +120,15 @@ DEFAULT_CONFIG = {
     # publishing as though it were something you sat down to watch.
     "smtc_min_duration": 60,
     "smtc_interval": 1.0,
+    # Treat a timeline that has not moved for this long as paused, for the sites
+    # that never report a Paused status of their own. 0 disables it.
+    "smtc_stall_seconds": 10,
     "smtc_ignore_apps": list(smtc.DEFAULT_IGNORE_APPS) if smtc else [],
+
+    # Site names to cut out of a title. The general rules catch anything with a
+    # digit or a domain suffix in it; this is for the ones spelled in plain
+    # English, which no rule can tell apart from a real title.
+    "strip_words": [],
 
     "idle_clear_seconds": 40,
     "idle_exit_seconds": 0,
@@ -490,7 +501,10 @@ def normalise(raw):
 
     season = _int(raw.get("season"), 0, 99)
     episode = _int(raw.get("episode"), 0, 9999)
-    kind = raw.get("kind") if raw.get("kind") in ("series", "movie") else "movie"
+    # None is a real answer here, meaning "no idea yet". Defaulting to "movie"
+    # is how a forty minute episode ended up published as a film; kind_of()
+    # decides later, with the runtime available to it.
+    kind = raw.get("kind") if raw.get("kind") in ("series", "movie") else None
     # A season or episode number is stronger evidence than the page's own
     # og:type, which these sites frequently leave as "video.movie" sitewide.
     if season or episode:
@@ -700,36 +714,79 @@ def _set(activity, key, value):
         activity[key] = value[:MAX_TEXT]
 
 
+def _clock(seconds):
+    """1h 52m 07s style, as h:mm:ss or m:ss. Used for a paused card."""
+    if seconds is None:
+        return ""
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def kind_of(rep):
+    """series, movie, or None when there is genuinely no way to tell.
+
+    A season or episode number settles it outright. Failing that, runtime is the
+    most reliable local signal there is: an episode runs twenty to seventy-five
+    minutes and a feature runs longer. That matters because the title alone is
+    often silent on the question, and a forty minute episode of a show was
+    previously being published as "Movie".
+    """
+    if rep.get("season") or rep.get("episode"):
+        return "series"
+    if rep.get("kind") in ("series", "movie"):
+        return rep["kind"]
+    dur = rep.get("duration")
+    if isinstance(dur, (int, float)) and dur > 0:
+        if 20 * 60 <= dur <= 75 * 60:
+            return "series"
+        if dur > 80 * 60:
+            return "movie"
+    return None
+
+
 def build_activity(rep, cfg):
     """Turn one normalised report into a Discord activity payload."""
     title = rep["title"]
     paused = rep["paused"]
+    kind = kind_of(rep)
 
-    if rep["kind"] == "series":
-        bits = []
-        season, episode = rep["season"], rep["episode"]
-        if season and episode:
-            bits.append(f"S{season}:E{episode}")
-        elif episode:
-            bits.append(f"Episode {episode}")
-        elif season:
-            bits.append(f"Season {season}")
-        if rep["episode_title"]:
-            bits.append(rep["episode_title"])
-        what = DOT.join(bits) or "Series"
-    else:
-        bits = []
-        if rep["year"]:
-            bits.append(str(rep["year"]))
-        bits.append("Movie")
-        what = DOT.join(bits)
+    # What this is, as the header word. Neutral when unknown rather than a
+    # confident guess: "Watching Video" is honest, "Watching Movie" over a
+    # forty minute episode is not.
+    heading = {"series": "Series", "movie": "Movie"}.get(kind, "Video")
 
-    # The site is collected but not published unless asked for: broadcasting
-    # where you stream from is nobody else's business, and it is the one field
-    # here that says more about you than about what you are watching.
+    # The title, plus where in it we are.
+    named = [title]
+    season, episode = rep["season"], rep["episode"]
+    if season and episode:
+        named.append(f"S{season}:E{episode}")
+    elif episode:
+        named.append(f"Episode {episode}")
+    elif season:
+        named.append(f"Season {season}")
+    named = DOT.join(named)
+
+    # Trailing context. The site is collected but never published unless asked
+    # for: broadcasting where you stream from is nobody else's business, and it
+    # is the one field here that says more about you than about what you watch.
     where = []
+    if rep["episode_title"]:
+        where.append(rep["episode_title"])
+    elif rep["year"]:
+        where.append(str(rep["year"]))
     if paused:
-        where.append(cfg.get("paused_label") or "Paused")
+        # Discord will not animate a timestamp we do not send, so a paused card
+        # would otherwise lose its position entirely. Spelling it out keeps it.
+        label = cfg.get("paused_label") or "Paused"
+        pos, dur = rep["position"], rep["duration"]
+        if pos is not None and dur:
+            where.append(f"{label} at {_clock(pos)} / {_clock(dur)}")
+        elif pos is not None:
+            where.append(f"{label} at {_clock(pos)}")
+        else:
+            where.append(label)
     if rep["quality"]:
         where.append(rep["quality"])
     if cfg.get("show_site") and rep["site"]:
@@ -737,21 +794,28 @@ def build_activity(rep, cfg):
     where = DOT.join(where)
 
     activity = {"type": int(cfg.get("activity_type", 3))}
+    header_mode = cfg.get("header_mode", "kind")
 
-    if cfg.get("header_mode", "title") == "title":
-        # Verified working: `name` overrides the top line, so the header can be
-        # the title itself and the two lines below carry the detail.
+    if header_mode == "kind":
+        # Header names what this is; the title moves to the line below, which is
+        # where a long name has room to breathe anyway.
+        _set(activity, "name", heading)
+        _set(activity, "details", named)
+        _set(activity, "state", where)
+    elif header_mode == "title":
+        # `name` overrides the top line, so the header can be the title itself.
         _set(activity, "name", title)
-        _set(activity, "details", what)
+        _set(activity, "details", DOT.join(named.split(DOT)[1:]) or heading)
         _set(activity, "state", where)
     else:
-        # Fallback layout for when the header is the Discord application's own
-        # name. The title has to move down a line, which costs us `where`.
-        _set(activity, "details", title)
-        _set(activity, "state", DOT.join(x for x in (what, where) if x))
+        # The header is the Discord application's own name, so everything has to
+        # move down a line and the context line is what gets squeezed.
+        _set(activity, "details", named)
+        _set(activity, "state", where or heading)
 
     # Discord animates timestamps client-side, so a paused card would keep
-    # counting down on its own. Send them only while actually playing.
+    # counting down on its own. Send them only while actually playing; the
+    # paused position is written into `where` above instead.
     mode = cfg.get("timestamp_mode", "remaining")
     pos, dur = rep["position"], rep["duration"]
     if mode != "off" and not paused and pos is not None:
@@ -938,6 +1002,8 @@ def main(argv):
             min_duration=cfg.get("smtc_min_duration", 60),
             ignore_apps=cfg.get("smtc_ignore_apps"),
             interval=cfg.get("smtc_interval", 1.0),
+            site_words=cfg.get("strip_words"),
+            stall_seconds=cfg.get("smtc_stall_seconds", 10),
         )
         if not smtc_src.start():
             smtc_src = None
@@ -1024,11 +1090,18 @@ def main(argv):
             # Done BEFORE the comparison, so the arriving poster is itself a
             # change worth rebuilding for. Enriching afterwards would mean a
             # source repeating one identical report never picked its art up.
-            if meta is not None and not rep.get("poster"):
-                found = meta.poster_for(rep["title"], rep["kind"],
-                                        rep.get("year"))
-                if found:
-                    rep = dict(rep, poster=found)
+            if meta is not None and (not rep.get("poster") or not rep.get("kind")):
+                info = meta.info_for(rep["title"], rep["kind"], rep.get("year"))
+                if info:
+                    patch = {}
+                    if not rep.get("poster") and info.get("poster"):
+                        patch["poster"] = info["poster"]
+                    # Which provider answered settles the kind: TVmaze and
+                    # AniList hold nothing but shows, so a hit there is proof.
+                    if not rep.get("kind") and info.get("kind"):
+                        patch["kind"] = info["kind"]
+                    if patch:
+                        rep = dict(rep, **patch)
 
             if rep != last_report:
                 last_report = dict(rep)

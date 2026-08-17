@@ -5,17 +5,18 @@
   "source": "auto",
 
   "activity_type": 3,
-  "header_mode": "title",
+  "header_mode": "kind",
   "timestamp_mode": "remaining",
 
   "show_poster": true,
   "show_site": false,
-  "show_status_icon": false,
 
   "poster_lookup": true,
   "tmdb_api_key": "",
 
   "smtc_min_duration": 60,
+  "smtc_stall_seconds": 10,
+  "strip_words": [],
 
   "idle_clear_seconds": 40,
   "debug": false

@@ -101,9 +101,52 @@ SEASON_ONLY = [re.compile(r"\bseason[\s-]*(\d{1,2})\b", re.I)]
 YEAR = re.compile(r"[(\[]\s*((?:19|20)\d{2})\s*[)\]]")
 
 
-def clean_title(raw):
+# "... on Movies2Watch", "... at fmovies.to". Streaming sites bolt their own
+# name onto the page title with no separator, so the segment split cannot reach
+# it and the noise list never saw it coming.
+#
+# The trailing token must look like a site, not like English, or real titles
+# lose their endings: "Girl on Fire" must survive. A digit inside the word
+# ("Movies2Watch") or a domain suffix ("fmovies.to") is the tell. A bare word
+# like "Fire" matches neither.
+SITE_TAIL = re.compile(
+    r"""\s+(?:on|at|from)\s+
+        (?: \w*\d\w*                                  # has a digit in it
+          | [\w-]+\.(?:tv|to|com|net|org|cc|me|io|xyz|watch|club|site|
+                       online|film|movie|stream|pw|se|sx|ru|in|co)
+        )
+        \s*$""",
+    re.I | re.X,
+)
+
+# A bare domain anywhere in the title.
+BARE_DOMAIN = re.compile(
+    r"\b[\w-]+\.(?:tv|to|com|net|org|cc|me|io|xyz|watch|club|site|online|"
+    r"film|movie|stream|pw|se|sx)\b", re.I)
+
+
+def strip_site_words(t, words):
+    """Remove operator-supplied site names, and any "on <name>" around them.
+
+    The general rules cannot catch a site whose name is plain English, so
+    `strip_words` in config.json is the escape hatch for those.
+    """
+    for w in words or ():
+        w = str(w or "").strip()
+        if len(w) < 2:
+            continue
+        t = re.sub(r"\s*\b(?:on|at|from)\s+" + re.escape(w) + r"\b", " ", t,
+                   flags=re.I)
+        t = re.sub(r"\b" + re.escape(w) + r"\b", " ", t, flags=re.I)
+    return t
+
+
+def clean_title(raw, site_words=()):
     t = str(raw or "")
     t = re.sub(r"^\s*(watch|stream|play)\s+", "", t, flags=re.I)
+    t = strip_site_words(t, site_words)
+    t = SITE_TAIL.sub(" ", t)
+    t = BARE_DOMAIN.sub(" ", t)
 
     # Keep the leading segment before a separator, but only when what is left is
     # still substantial: "Mr. Robot - Season 1" should lose the tail, while
@@ -114,6 +157,12 @@ def clean_title(raw):
 
     for pat in NOISE:
         t = pat.sub(" ", t)
+
+    # Again, because both earlier passes can only see the string they were given.
+    # "X on Movies2Watch - Free HD" hides the tail behind a separator, and
+    # removing "Free HD" is what finally exposes it at the end of the string.
+    t = SITE_TAIL.sub(" ", t.rstrip())
+    t = BARE_DOMAIN.sub(" ", t)
 
     t = re.sub(r"\(\s*\)", " ", t)
     t = re.sub(r"\s{2,}", " ", t)
@@ -157,11 +206,23 @@ def find_year(haystacks):
     return None
 
 
-def parse_title(title, artist=""):
+def parse_title(title, artist="", site_words=()):
     """Best effort structured report from a title string and nothing else."""
     hay = [title or "", artist or ""]
     season, episode = find_season_episode(hay)
-    cleaned = clean_title(title)
+
+    # Chromium often puts the site's own origin in `artist` when the page sets no
+    # Media Session metadata. When it does, that string is the site name we need
+    # to strip, learned rather than configured.
+    words = list(site_words or ())
+    tag = (artist or "").strip()
+    if 2 <= len(tag) <= 40 and " " not in tag:
+        words.append(tag)
+        base = tag.split(".")[0]
+        if len(base) >= 3:
+            words.append(base)
+
+    cleaned = clean_title(title, words)
     # Strip the markers now that they have been captured, so the title line does
     # not repeat what the details line already says. The year goes too: it is
     # published as part of the movie details, and "Blade Runner 2049 (2017)"
@@ -171,8 +232,10 @@ def parse_title(title, artist=""):
     cleaned = re.sub(r"\(\s*\)", " ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" \t-|:,·–—")
     return {
-        "title": cleaned or clean_title(title),
-        "kind": "series" if (season or episode) else "movie",
+        "title": cleaned or clean_title(title, words),
+        # None, not "movie". A title-only source usually cannot tell, and
+        # guessing wrong publishes a forty minute episode as a film.
+        "kind": "series" if (season or episode) else None,
         "season": season,
         "episode": episode,
         "episode_title": "",
@@ -193,9 +256,13 @@ class SmtcSource:
     """
 
     def __init__(self, log, min_duration=60.0, ignore_apps=None,
-                 interval=1.0):
+                 interval=1.0, site_words=None, stall_seconds=10.0):
         self.log = log
+        self.site_words = tuple(site_words or ())
         self.min_duration = float(min_duration)
+        self.stall_seconds = float(stall_seconds)
+        self._pos_sig = None
+        self._pos_sig_at = 0.0
         self.ignore_apps = tuple(
             a.lower() for a in (ignore_apps
                                 if ignore_apps is not None
@@ -259,6 +326,14 @@ class SmtcSource:
                 with self._lock:
                     self._latest = msg
                     self._latest_at = time.time()
+                    # Track when the reported timeline last actually moved.
+                    # Some sites never push a Paused status, so a frozen
+                    # timeline is the only evidence that playback stopped.
+                    sig = (msg.get("position"), msg.get("positionAt"),
+                           msg.get("title"))
+                    if sig != self._pos_sig:
+                        self._pos_sig = sig
+                        self._pos_sig_at = time.time()
         except (OSError, ValueError):
             pass
         finally:
@@ -294,6 +369,7 @@ class SmtcSource:
         with self._lock:
             msg = self._latest
             at = self._latest_at
+            moved_at = self._pos_sig_at
 
         if not msg or not msg.get("session"):
             return None
@@ -321,6 +397,23 @@ class SmtcSource:
         status = (msg.get("status") or "").lower()
         paused = status != "playing"
 
+        # Some players never update their SMTC status when the user pauses,
+        # especially once the tab is no longer in the foreground. The card then
+        # counts down forever: the reported position freezes, but extrapolating
+        # from it keeps the derived start fixed, so Discord animates a countdown
+        # that has nothing to do with what is on screen.
+        #
+        # A timeline that has not moved for this long is treated as stopped. The
+        # threshold is well clear of the roughly one-second cadence a genuinely
+        # playing tab reports at.
+        if not paused and self.stall_seconds > 0 and moved_at:
+            if time.time() - moved_at > self.stall_seconds:
+                paused = True
+                self._warn_once(
+                    "stall",
+                    "smtc: timeline stopped moving while status still said "
+                    "Playing; treating as paused")
+
         position = msg.get("position")
         if not isinstance(position, (int, float)):
             position = None
@@ -336,7 +429,7 @@ class SmtcSource:
             if duration:
                 position = min(position, duration)
 
-        report = parse_title(title, msg.get("artist") or "")
+        report = parse_title(title, msg.get("artist") or "", self.site_words)
         report.update({
             "site": "",           # SMTC has no url, and the site is not
             "url": "",            # published anyway
@@ -351,15 +444,33 @@ class SmtcSource:
 
 
 if __name__ == "__main__":
-    # Manual check: python smtc.py
-    src = SmtcSource(lambda m: print(m, flush=True))
+    # Diagnostic: python smtc.py
+    #
+    # Prints the RAW session Windows reports alongside what this module makes of
+    # it. The raw half is what matters when a title comes out wrong: it shows
+    # exactly what the site handed over, including whether `artist` carries the
+    # site name and whether `status` ever changes to Paused.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace",
+                               line_buffering=True)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    src = SmtcSource(lambda m: print("  [" + m + "]", flush=True))
     if not src.start():
         sys.exit(1)
+    print("Play something, then pause it, and watch both lines.\n"
+          "Ctrl+C to stop.\n")
     try:
         while True:
             time.sleep(1.5)
+            with src._lock:
+                raw = src._latest
             snap = src.snapshot()
-            print(json.dumps(snap, ensure_ascii=False) if snap else "(nothing)",
-                  flush=True)
+            print("raw    " + (json.dumps(raw, ensure_ascii=False)
+                               if raw else "(no session)"))
+            print("parsed " + (json.dumps(snap, ensure_ascii=False)
+                               if snap else "(nothing publishable)"))
+            print()
     except KeyboardInterrupt:
         src.stop()
