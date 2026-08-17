@@ -80,11 +80,21 @@ while ($true) {
             $tl = $s.GetTimelineProperties()
 
             $title = $null; $artist = $null; $hasArt = $false
+            $album = $null; $subtitle = $null; $track = 0
             try {
                 $p = Await ($s.TryGetMediaPropertiesAsync()) ($propType)
                 $title = $p.Title
                 $artist = $p.Artist
                 $hasArt = ($null -ne $p.Thumbnail)
+                # A site implementing the Media Session API properly puts the
+                # show in AlbumTitle and the episode in Title or Subtitle, and
+                # sometimes the episode number in TrackNumber. Sites that set
+                # nothing leave all of these empty, and Chromium falls back to
+                # the page title, so reading them costs nothing and is the only
+                # way to get a season or episode without the extension.
+                $album = $p.AlbumTitle
+                $subtitle = $p.Subtitle
+                $track = $p.TrackNumber
             } catch {
                 # Media props can transiently fail while a tab is switching
                 # tracks. Timeline and status are still worth reporting.
@@ -109,6 +119,9 @@ while ($true) {
                 status       = [string]$info.PlaybackStatus
                 title        = $title
                 artist       = $artist
+                album        = $album
+                subtitle     = $subtitle
+                track        = $track
                 position     = ($tl.Position - $tl.StartTime).TotalSeconds
                 duration     = $duration
                 positionAt   = $positionAt

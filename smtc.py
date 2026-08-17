@@ -206,10 +206,21 @@ def find_year(haystacks):
     return None
 
 
-def parse_title(title, artist="", site_words=()):
-    """Best effort structured report from a title string and nothing else."""
-    hay = [title or "", artist or ""]
+def parse_title(title, artist="", site_words=(), album="", subtitle="",
+                track=0):
+    """Best effort structured report from whatever the media session offered.
+
+    A site implementing the Media Session API properly puts the show in `album`
+    and the episode in `title` or `subtitle`. A site that sets nothing leaves
+    them all empty and Chromium falls back to the page title, in which case only
+    that title is available and a season or episode may simply not be knowable.
+    """
+    hay = [title or "", subtitle or "", album or "", artist or ""]
     season, episode = find_season_episode(hay)
+
+    # An explicit track number beats anything guessed out of prose.
+    if not episode and isinstance(track, int) and 0 < track < 10000:
+        episode = track
 
     # Chromium often puts the site's own origin in `artist` when the page sets no
     # Media Session metadata. When it does, that string is the site name we need
@@ -231,14 +242,24 @@ def parse_title(title, artist="", site_words=()):
         cleaned = pat.sub(" ", cleaned)
     cleaned = re.sub(r"\(\s*\)", " ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" \t-|:,·–—")
+
+    # When `album` is set it names the show and `title` names the episode, which
+    # is how a site implementing the Media Session API is supposed to fill these
+    # in. Some sites set album to the same string as title, so that is checked
+    # rather than assumed.
+    show = clean_title(album, words) if album else ""
+    name, ep_title = cleaned, (subtitle or "").strip()
+    if show and show.lower() != cleaned.lower():
+        name, ep_title = show, (cleaned or ep_title)
+
     return {
-        "title": cleaned or clean_title(title, words),
+        "title": name or clean_title(title, words),
         # None, not "movie". A title-only source usually cannot tell, and
         # guessing wrong publishes a forty minute episode as a film.
         "kind": "series" if (season or episode) else None,
         "season": season,
         "episode": episode,
-        "episode_title": "",
+        "episode_title": ep_title[:128],
         "year": find_year(hay),
     }
 
@@ -443,7 +464,14 @@ class SmtcSource:
             if duration:
                 position = min(position, duration)
 
-        report = parse_title(title, msg.get("artist") or "", self.site_words)
+        report = parse_title(
+            title,
+            msg.get("artist") or "",
+            self.site_words,
+            album=msg.get("album") or "",
+            subtitle=msg.get("subtitle") or "",
+            track=msg.get("track") or 0,
+        )
         report.update({
             "site": "",           # SMTC has no url, and the site is not
             "url": "",            # published anyway

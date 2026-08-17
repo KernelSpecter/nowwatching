@@ -235,11 +235,27 @@ Chromium tab playing video registers one, which makes it the browser-side
 equivalent of mpv's IPC socket: an OS-level interface, no per-site adapters, no
 permissions.
 
-Its one real weakness is that title quality is entirely up to the site. A site
-implementing the Media Session API properly reports a real title. A site that
-does not gets whatever Chromium infers, which is usually the page `<title>` and
-can be as useless as the bare word `Instagram`. That gap is the entire reason
-the extension still exists.
+Its one real weakness is that it only knows what the site tells Windows, and most
+streaming sites tell it almost nothing. Here is a real session from
+movies2watch, in full:
+
+```json
+{"title": "Watch The Mentalist (2008) Online free on Movies2Watch",
+ "artist": "gn1r5n.org", "album": "", "subtitle": "", "track": 0,
+ "duration": 2424, "status": "Playing"}
+```
+
+That is everything available. The title is series-level, so **the season and
+episode are simply not knowable from this source**, and `album`, `subtitle` and
+`track` (which a site implementing the Media Session API properly would fill in)
+are all empty. The runtime says it is a 40 minute episode; nothing says which.
+
+A well-behaved site does better: YouTube reports a real title and the channel in
+`artist`. A badly-behaved one is worse still, reporting the bare word
+`Instagram`.
+
+That gap is the entire reason the extension exists. If you want the season and
+episode, that is the only way to get them.
 
 ---
 
@@ -567,6 +583,18 @@ down to titles a database recognises as a film or a series. Check it is `true`.
 If something still slips through, add a distinctive word from it to
 `smtc_ignore_sources`. And if you want a hard guarantee instead of a heuristic,
 use the extension: it only ever reports sites you explicitly enabled.
+</details>
+
+<details>
+<summary><b>No season or episode is shown</b></summary>
+
+Almost certainly because the site never tells Windows. Run `python smtc.py`
+while an episode plays and look at the raw line: if `title` names the series
+rather than the episode, and `album`, `subtitle` and `track` are empty, then the
+information does not exist on this path and nothing in the daemon can invent it.
+
+The extension reads it from the URL and the episode list, which is exact. This is
+the main thing it is for.
 </details>
 
 <details>
