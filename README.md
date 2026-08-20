@@ -16,15 +16,7 @@
   <img src="docs/preview.svg" alt="The nowwatching activity card on a Discord profile" width="470">
 </p>
 
-<!--
-  ^ Placeholder mockup. To swap in a real screenshot:
-      1. Start playing something, then screenshot your Discord profile card.
-         Discord hides activity buttons on your OWN profile, so a second
-         account or a mutual server's member list shows more.
-      2. Save it as docs/preview.png
-      3. Change the src above to docs/preview.png and drop the width if it
-         looks small.
--->
+
 
 ---
 
